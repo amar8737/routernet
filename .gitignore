@@ -216,3 +216,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ============================================================
+# routernet: project-local ignore rules
+# ============================================================
+
+# IDE
+.idea/
+
+# Benchmark / experiment outputs
+results/
+benchmark_data/
+
+# Research artifacts (kept locally, not part of the published package)
+ace-benchmark/
+Code/
+data/
+
+# Internal-only benchmark (not published, not tracked)
+benchmarks/
