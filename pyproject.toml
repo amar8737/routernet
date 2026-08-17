@@ -53,8 +53,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/anomalyco/routernet"
-Repository = "https://github.com/anomalyco/routernet"
+Homepage = "https://github.com/amar8737/routernet"
+Repository = "https://github.com/amar8737/routernet"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/routernet"]
