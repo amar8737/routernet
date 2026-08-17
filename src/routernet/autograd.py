@@ -364,6 +364,18 @@ class Tensor:
         out._backward = _backward
         return out
 
+    def unsqueeze(self, axis):
+        """Insert a new axis; gradient is summed back over it."""
+        out_data = np.expand_dims(self.data, axis)
+        out = Tensor(out_data, (self,), f"unsqueeze_{axis}")
+
+        def _backward():
+            if self.requires_grad:
+                self.grad += np.sum(out.grad, axis=axis)
+
+        out._backward = _backward
+        return out
+
     def relu(self):
         out_data = np.maximum(0, self.data)
         out = Tensor(out_data, (self,), "relu")
@@ -376,7 +388,7 @@ class Tensor:
         return out
 
     def exp(self):
-        out_data = np.exp(self.data)
+        out_data = np.exp(np.clip(self.data, -50.0, 50.0))
         out = Tensor(out_data, (self,), "exp")
 
         def _backward():

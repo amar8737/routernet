@@ -103,26 +103,34 @@ class GatingNetwork:
         return weights, logits
 
     def loss(self, weights: Tensor, oof_probas: np.ndarray, y: np.ndarray):
-        """Compute ensemble cross-entropy loss + utilization regularization."""
+        """Compute ensemble cross-entropy loss + utilization regularization.
+
+        Built entirely from ``Tensor`` ops so gradients flow back to the gate
+        network parameters.
+        """
         n, K, C = oof_probas.shape
 
-        # Ensemble probability: sum_k w_k * p_k
-        ensemble_proba = np.zeros((n, oof_probas.shape[2]))
-        for k in range(K):
-            w = weights.data[:, k : k + 1]  # (n, 1)
-            ensemble_proba += w * oof_probas[:, k]
+        # Ensemble probability: sum_k w_k * p_k  (n, C)
+        w = weights.unsqueeze(-1)  # (n, K, 1)
+        oof_t = Tensor(oof_probas.astype(np.float32), requires_grad=False)
+        ensemble = (w * oof_t).sum(axis=1)  # (n, C)
 
-        # Cross-entropy loss
-        eps = 1e-15
-        ce = -np.mean(np.log(ensemble_proba[np.arange(n), y] + eps))
+        # Cross-entropy loss (differentiable through log/one-hot masking)
+        eps = 1e-9
+        one_hot = np.zeros((n, C), dtype=np.float32)
+        one_hot[np.arange(n), y] = 1.0
+        ce = -((Tensor(one_hot, requires_grad=False) * (ensemble + eps).log()).sum(axis=1)).mean()
 
         # Utilization regularization: entropy of mean weights
-        util = np.mean(weights.data, axis=0)
-        util_entropy = -np.sum(util * np.log(util + 1e-10))
-        balance_loss = -0.01 * util_entropy
+        util = weights.mean(axis=0)  # (K,)
+        util_entropy = -((util + 1e-10).log() * util).sum()
+        balance_loss = (-0.01) * util_entropy
 
         total_loss = ce + balance_loss
-        return Tensor(np.array([total_loss])), ce, util_entropy
+        ce_np = float(
+            -np.mean(np.log(np.clip(ensemble.data[np.arange(n), y], 1e-9, None)))
+        )
+        return total_loss, ce_np, float(util_entropy.data)
 
     def fit(
         self,
@@ -179,6 +187,7 @@ class ConfidenceGate:
     def forward(self, context: np.ndarray) -> Tensor:
         x = Tensor(context) if isinstance(context, np.ndarray) else context
         logits = x @ self.W + self.b
+        logits = logits * 0.5  # dampen scale before sigmoid
         return 1.0 / (1.0 + (-logits).exp())  # sigmoid
 
     def fit(
@@ -219,7 +228,7 @@ class ConfidenceGate:
         for epoch in range(epochs):
             context_tensor = Tensor(context)
             gate_logits = context_tensor @ self.W + self.b
-            gate = Tensor(1.0) / (Tensor(1.0) + (-gate_logits).exp())
+            gate = Tensor(1.0) / (Tensor(1.0) + (-gate_logits * 0.5).exp())
 
             # BCE loss
             eps = 1e-15
@@ -241,7 +250,7 @@ class ConfidenceGate:
     def predict(self, context: np.ndarray) -> np.ndarray:
         x = Tensor(context) if isinstance(context, np.ndarray) else context
         logits = x @ self.W + self.b
-        gate = Tensor(1.0) / (Tensor(1.0) + (-logits).exp())
+        gate = Tensor(1.0) / (Tensor(1.0) + (-logits * 0.5).exp())
         return gate.data
 
 

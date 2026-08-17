@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "routernet"
-version = "0.1.0"
+version = "0.1.01"
 description = "Per-sample specialist routing ensemble with learned context awareness (ACE)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
-  { name = "routernet contributors" },
+  { name = "Amar Jeet Kushwaha" },
 ]
 keywords = [
   "ensemble", "routing", "mixture-of-experts", "context-aware",

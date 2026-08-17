@@ -235,3 +235,4 @@ data/
 
 # Internal-only benchmark (not published, not tracked)
 benchmarks/
+run_benchmark.sh
