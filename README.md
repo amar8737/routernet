@@ -66,11 +66,6 @@ analysis = analyze_routing(clf, X, y)     # routing summary
 print_routing_analysis(analysis)
 ```
 
-## Legacy v1
-
-The original v1 implementation is kept for reproducibility in
-`routernet.legacy` (`LegacyRouternetClassifier`, `LegacyRouternetRegressor`).
-
 ## Development
 
 ```bash

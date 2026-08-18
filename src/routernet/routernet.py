@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, clone
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import (
     ExtraTreesClassifier,
     GradientBoostingClassifier,
@@ -360,8 +361,9 @@ class RouternetClassifier(BaseEstimator, ClassifierMixin):
                 n_jobs=-1,
             )
         elif spec_type == "svm":
-            return SVC(
-                kernel="rbf", probability=True, C=1.0, gamma="scale", random_state=rs
+            return CalibratedClassifierCV(
+                SVC(kernel="rbf", C=1.0, gamma="scale", random_state=rs),
+                ensemble=False,
             )
         elif spec_type == "mlp":
             return MLPClassifier(
