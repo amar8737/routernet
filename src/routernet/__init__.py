@@ -25,7 +25,7 @@ from .gate import ConfidenceGate, GatingNetwork, MetaWeightLearner
 from .routernet import RouternetClassifier, RouternetRegressor
 from .utils import analyze_routing, print_routing_analysis
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 __all__ = [
     "RouternetClassifier",
