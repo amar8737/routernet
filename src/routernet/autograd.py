@@ -95,7 +95,7 @@ class Value:
 
         def _backward():
             self.grad += (1 / other.data) * out.grad
-            other.grad += (-self.data / (other.data**2)) * out.grad
+            other.grad += (-out.data / other.data) * out.grad
 
         out._backward = _backward
         return out
@@ -299,7 +299,7 @@ class Tensor:
                     grad = self._broadcast_grad(self.data.shape, grad)
                 self.grad += grad
             if other.requires_grad:
-                grad = (-self.data / (other.data**2)) * out.grad
+                grad = (-out.data / other.data) * out.grad
                 if other.data.shape != grad.shape:
                     grad = self._broadcast_grad(other.data.shape, grad)
                 other.grad += grad
