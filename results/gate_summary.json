@@ -1,0 +1,46 @@
+{
+  "n_tasks": 6,
+  "win_rate": 0.6666666666666666,
+  "required_win_rate": 0.5,
+  "rel_accuracy": 1.0027841301438414,
+  "required_rel_accuracy": 0.97,
+  "passed": true,
+  "per_task": [
+    {
+      "routernet": 0.996875,
+      "best_baseline": 0.99375,
+      "median_baseline": 0.9906250000000001,
+      "best_baseline_name": "XGBoost"
+    },
+    {
+      "routernet": 0.974,
+      "best_baseline": 0.955,
+      "median_baseline": 0.9117500000000001,
+      "best_baseline_name": "XGBoost"
+    },
+    {
+      "routernet": 0.9523809523809523,
+      "best_baseline": 0.9365079365079365,
+      "median_baseline": 0.9126984126984127,
+      "best_baseline_name": "XGBoost"
+    },
+    {
+      "routernet": 0.98,
+      "best_baseline": 0.96,
+      "median_baseline": 0.96,
+      "best_baseline_name": "RandomForest"
+    },
+    {
+      "routernet": 0.825,
+      "best_baseline": 0.85,
+      "median_baseline": 0.8374999999999999,
+      "best_baseline_name": "XGBoost"
+    },
+    {
+      "routernet": 0.9571428571428572,
+      "best_baseline": 0.9714285714285714,
+      "median_baseline": 0.9714285714285714,
+      "best_baseline_name": "RandomForest"
+    }
+  ]
+}
