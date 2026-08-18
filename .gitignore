@@ -230,3 +230,4 @@ Code/
 data/
 # Internal-only benchmark (not published, not tracked)
 
+catboost_info/

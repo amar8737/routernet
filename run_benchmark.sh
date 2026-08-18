@@ -23,7 +23,7 @@ fi
 
 exec python -u benchmarks/openml_benchmark.py \
   --gate-tasks 6 \
-  --limit 10 \
+  --limit 20 \
   --n-folds 1 \
   --output results \
   "${ARGS[@]}"

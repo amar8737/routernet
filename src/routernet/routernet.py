@@ -57,8 +57,9 @@ class RouternetClassifier(BaseEstimator, ClassifierMixin):
         Number of neighbors for KNN in the context encoder.
     specialist_types : list of str or estimators, default=['cat', 'xgb', 'rf', 'svm', 'mlp']
         Types of specialist models. String options: 'gb', 'rf', 'svm', 'mlp',
-        'dt', 'cat', 'xgb', 'et'. Alternatively, provide pre-instantiated
-        sklearn estimators (they are cloned in ``fit``).
+        'mlp2', 'mlp3', 'mlp4', 'dt', 'cat', 'xgb', 'et'. Alternatively,
+        provide pre-instantiated sklearn estimators (they are cloned in
+        ``fit``).
     oof_folds : int, default=5
         Number of folds for out-of-fold specialist predictions.
     use_global_fallback : bool, default=True
@@ -69,6 +70,15 @@ class RouternetClassifier(BaseEstimator, ClassifierMixin):
         Number of epochs to train the gating network.
     gate_lr : float, default=1e-3
         Learning rate for the gating network.
+    gate_batch_size : int, default=256
+        Minibatch size for gating-network training. Values ``<= 0`` or ``>= n``
+        fall back to full-batch training.
+    gate_lr_schedule : str, default="cosine"
+        Learning-rate schedule for the gating network ("cosine" or "none").
+    gate_patience : int, default=10
+        Early-stopping epochs for the gating network. ``<= 0`` disables it.
+    gate_val_fraction : float, default=0.15
+        Fraction of OOF rows held out as the gating-network validation slice.
     verbose : bool, default=False
         Whether to print progress during fitting.
     random_state : int, default=42
@@ -86,6 +96,10 @@ class RouternetClassifier(BaseEstimator, ClassifierMixin):
         gate_hidden: tuple = (128, 64),
         gate_epochs: int = 200,
         gate_lr: float = 1e-3,
+        gate_batch_size: int = 256,
+        gate_lr_schedule: str = "cosine",
+        gate_patience: int = 10,
+        gate_val_fraction: float = 0.15,
         verbose: bool = False,
         random_state: int = 42,
     ):
@@ -104,6 +118,10 @@ class RouternetClassifier(BaseEstimator, ClassifierMixin):
         self.gate_hidden = gate_hidden
         self.gate_epochs = gate_epochs
         self.gate_lr = gate_lr
+        self.gate_batch_size = gate_batch_size
+        self.gate_lr_schedule = gate_lr_schedule
+        self.gate_patience = gate_patience
+        self.gate_val_fraction = gate_val_fraction
         self.verbose = verbose
         self.random_state = random_state
 
@@ -177,6 +195,11 @@ class RouternetClassifier(BaseEstimator, ClassifierMixin):
             y_encoded,
             epochs=self.gate_epochs,
             lr=self.gate_lr,
+            batch_size=self.gate_batch_size,
+            lr_schedule=self.gate_lr_schedule,
+            patience=self.gate_patience,
+            val_fraction=self.gate_val_fraction,
+            random_state=self.random_state,
             verbose=self.verbose,
         )
 
@@ -190,6 +213,8 @@ class RouternetClassifier(BaseEstimator, ClassifierMixin):
                 oof_probas,
                 y_encoded,
                 gate_weights=gate_weights,
+                batch_size=self.gate_batch_size,
+                lr_schedule=self.gate_lr_schedule,
                 verbose=self.verbose,
             )
 
@@ -370,6 +395,33 @@ class RouternetClassifier(BaseEstimator, ClassifierMixin):
                 hidden_layer_sizes=(128, 64, 32),
                 max_iter=500,
                 alpha=0.001,
+                early_stopping=True,
+                n_iter_no_change=20,
+                random_state=rs,
+            )
+        elif spec_type == "mlp2":
+            return MLPClassifier(
+                hidden_layer_sizes=(256, 128),
+                max_iter=500,
+                alpha=0.0005,
+                early_stopping=True,
+                n_iter_no_change=20,
+                random_state=rs,
+            )
+        elif spec_type == "mlp3":
+            return MLPClassifier(
+                hidden_layer_sizes=(64, 32, 16),
+                max_iter=500,
+                alpha=0.005,
+                early_stopping=True,
+                n_iter_no_change=20,
+                random_state=rs,
+            )
+        elif spec_type == "mlp4":
+            return MLPClassifier(
+                hidden_layer_sizes=(512, 256, 128),
+                max_iter=500,
+                alpha=0.0001,
                 early_stopping=True,
                 n_iter_no_change=20,
                 random_state=rs,

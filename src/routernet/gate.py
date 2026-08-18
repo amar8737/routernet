@@ -132,6 +132,15 @@ class GatingNetwork:
         )
         return total_loss, ce_np, float(util_entropy.data)
 
+    def _snapshot(self) -> list[np.ndarray]:
+        """Return a deep copy of all parameter values."""
+        return [p.data.copy() for p in self.parameters]
+
+    def _restore(self, snapshot: list[np.ndarray]) -> None:
+        """Restore parameter values from a snapshot."""
+        for p, data in zip(self.parameters, snapshot, strict=True):
+            p.data = data
+
     def fit(
         self,
         context: np.ndarray,
@@ -142,28 +151,105 @@ class GatingNetwork:
         temp_start: float = 1.0,
         temp_end: float = 0.1,
         util_weight: float = 0.01,
+        batch_size: int = 256,
+        lr_schedule: str = "cosine",
+        patience: int = 10,
+        val_fraction: float = 0.15,
+        random_state: int = 42,
         verbose: bool = False,
     ) -> GatingNetwork:
-        """Train the gating network using the built-in autograd engine."""
-        opt = Adam(self.parameters, lr=lr, weight_decay=1e-5)
+        """Train the gating network using the built-in autograd engine.
 
+        Training is run in minibatches of ``batch_size`` to bound peak memory to
+        ``O(batch_size)`` rather than ``O(n)``. An optional cosine learning-rate
+        schedule and early stopping on a held-out validation slice are applied.
+        Passing ``batch_size <= 0`` or ``batch_size >= n`` falls back to full-batch
+        training (the original behavior).
+        """
+        n = len(context)
+
+        # Optional held-out validation slice for early stopping (stratified on y).
+        val_idx = None
+        train_idx = np.arange(n)
+        if patience > 0 and val_fraction > 0:
+            val_fraction = min(val_fraction, 0.5)
+            val_size = max(1, int(n * val_fraction))
+            rng = np.random.RandomState(random_state)
+            val_idx = rng.choice(n, size=val_size, replace=False)
+            train_idx = np.setdiff1d(np.arange(n), val_idx)
+
+        opt = Adam(self.parameters, lr=lr, weight_decay=1e-5)
         temp_schedule = np.linspace(temp_start, temp_end, epochs)
+
+        use_batches = 0 < batch_size < n
+        best_snapshot = None
+        best_val = float("inf")
+        bad_epochs = 0
 
         for epoch in range(epochs):
             self.temperature = temp_schedule[epoch]
 
-            weights, logits = self.forward(context, training=True)
-            loss_tensor, ce, util_ent = self.loss(weights, oof_probas, y)
+            # Cosine learning-rate schedule.
+            if lr_schedule == "cosine":
+                frac = epoch / max(1, epochs - 1)
+                opt.lr = lr * (1.0 - 0.95 * (1.0 + np.cos(np.pi * frac)) / 2.0)
+            else:
+                opt.lr = lr
 
-            opt.zero_grad()
-            loss_tensor.backward()
-            opt.step()
+            epoch_loss = 0.0
+            num_batches = 0
+            if use_batches:
+                order = np.random.RandomState(random_state + epoch).permutation(train_idx)
+            else:
+                order = train_idx
+
+            for start in range(0, len(order), batch_size if use_batches else len(order)):
+                idx = order[start : start + batch_size] if use_batches else order
+                weights, logits = self.forward(context[idx], training=True)
+                loss_tensor, ce, util_ent = self.loss(weights, oof_probas[idx], y[idx])
+
+                opt.zero_grad()
+                loss_tensor.backward()
+                opt.step()
+                epoch_loss += loss_tensor.data
+                num_batches += 1
+
+            if use_batches:
+                epoch_loss /= num_batches
+
+            # Early-stopping check on the held-out validation slice.
+            if val_idx is not None:
+                weights, logits = self.forward(context[val_idx], training=False)
+                val_loss_tensor, val_ce, _ = self.loss(
+                    weights, oof_probas[val_idx], y[val_idx]
+                )
+                val_loss = float(val_loss_tensor.data)
+                if val_loss < best_val - 1e-6:
+                    best_val = val_loss
+                    best_snapshot = self._snapshot()
+                    bad_epochs = 0
+                else:
+                    bad_epochs += 1
+                    if bad_epochs >= patience:
+                        if best_snapshot is not None:
+                            self._restore(best_snapshot)
+                        if verbose:
+                            print(
+                                f"  Gate early stop at epoch {epoch}: "
+                                f"val CE={val_ce:.4f}"
+                            )
+                        return self
+            else:
+                best_val = min(best_val, epoch_loss)
 
             if verbose and epoch % 50 == 0:
                 print(
-                    f"  Gate epoch {epoch}: CE={ce:.4f}, "
+                    f"  Gate epoch {epoch}: CE={epoch_loss:.4f}, "
                     f"UtilEnt={util_ent:.4f}, Temp={self.temperature:.3f}"
                 )
+
+        if best_snapshot is not None:
+            self._restore(best_snapshot)
 
         return self
 
@@ -198,12 +284,18 @@ class ConfidenceGate:
         gate_weights: np.ndarray | None = None,
         epochs: int = 100,
         lr: float = 1e-3,
+        batch_size: int = 256,
+        lr_schedule: str = "cosine",
         verbose: bool = False,
     ) -> ConfidenceGate:
         """Train to predict when the gated ensemble beats the global (uniform) ensemble.
 
         The target is +1 when the gated routing is correct while the uniform
         ensemble is wrong, 0 for the opposite, and 0.5 when they agree.
+
+        Training runs in minibatches of ``batch_size`` to bound peak memory to
+        ``O(batch_size)``. Passing ``batch_size <= 0`` or ``batch_size >= n`` falls
+        back to full-batch training.
         """
         n = len(y)
         n_specialists = oof_probas.shape[1]
@@ -224,23 +316,37 @@ class ConfidenceGate:
         ).astype(np.float32).reshape(-1, 1)
 
         opt = Adam(self.parameters, lr=lr)
+        use_batches = 0 < batch_size < n
 
         for epoch in range(epochs):
-            context_tensor = Tensor(context)
-            gate_logits = context_tensor @ self.W + self.b
-            gate = Tensor(1.0) / (Tensor(1.0) + (-gate_logits * 0.5).exp())
+            # Cosine learning-rate schedule.
+            if lr_schedule == "cosine":
+                frac = epoch / max(1, epochs - 1)
+                opt.lr = lr * (1.0 - 0.95 * (1.0 + np.cos(np.pi * frac)) / 2.0)
+            else:
+                opt.lr = lr
 
-            # BCE loss
-            eps = 1e-15
-            target_tensor = Tensor(target)
-            loss = -(
-                target_tensor * (gate + eps).log()
-                + (Tensor(1.0) - target_tensor) * (Tensor(1.0) - gate + eps).log()
-            ).mean()
+            order = np.arange(n)
+            if use_batches:
+                order = np.random.permutation(order)
 
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
+            for start in range(0, n, batch_size if use_batches else n):
+                idx = order[start : start + batch_size] if use_batches else order
+                context_tensor = Tensor(context[idx])
+                gate_logits = context_tensor @ self.W + self.b
+                gate = Tensor(1.0) / (Tensor(1.0) + (-gate_logits * 0.5).exp())
+
+                # BCE loss
+                eps = 1e-15
+                target_tensor = Tensor(target[idx])
+                loss = -(
+                    target_tensor * (gate + eps).log()
+                    + (Tensor(1.0) - target_tensor) * (Tensor(1.0) - gate + eps).log()
+                ).mean()
+
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
 
             if verbose and epoch % 50 == 0:
                 print(f"  ConfGate epoch {epoch}: BCE={loss.data.item():.4f}")

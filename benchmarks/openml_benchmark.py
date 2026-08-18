@@ -58,6 +58,15 @@ except ImportError:  # pragma: no cover
 DEFAULT_SUITE = "OpenML-CC18"
 DEFAULT_SPECIALISTS = ["gb", "rf", "et", "svm", "mlp"]
 
+# Named specialist pools. Each yields a separate Routernet variant in the
+# results (e.g. an all-tree pool vs an all-neural-net pool) so we can measure
+# how the pool composition affects routing performance.
+SPECIALIST_POOLS: dict[str, list[str]] = {
+    "mixed": ["gb", "rf", "et", "svm", "mlp"],
+    "trees": ["rf", "et", "gb", "xgb", "dt"],
+    "nn": ["mlp", "mlp2", "mlp3", "mlp4", "mlp"],
+}
+
 
 class OpenMLBenchmarkError(RuntimeError):
     """Raised for benchmark-level failures (missing key, bad gate, etc.)."""
@@ -208,6 +217,131 @@ def _baseline_models() -> dict[str, object]:
     return models
 
 
+def _build_specialists(specialist_types: list[str], seed: int) -> list[object]:
+    """Construct the pool's specialist estimators (unfitted) via routernet's factory.
+
+    Reuses :meth:`RouternetClassifier._create_specialist` so the adaptive
+    ensemble baselines share *identical* base learners with the Routernet
+    variants (fair apples-to-apples comparison).
+    """
+    tmp = RouternetClassifier(
+        n_specialists=len(specialist_types),
+        specialist_types=specialist_types,
+        random_state=seed,
+    )
+    return [tmp._create_specialist(i) for i in range(len(specialist_types))]
+
+
+def _adaptive_baselines(
+    specialist_types: list[str], seed: int
+) -> dict[str, object]:
+    """Build adaptive-ensemble baselines over the pool's base learners.
+
+    These compare routing against the standard adaptive approaches that reuse
+    the exact same specialist pool:
+
+    - ``StackingCV``: out-of-fold stacking with a logistic-regression
+      meta-learner (the classic adaptive ensemble).
+    - ``AlgSelect``: honest per-task algorithm selection -- picks the best
+      specialist on a held-out validation split (no test peeking).
+    - ``DCSLA``: dynamic classifier selection by local accuracy -- assigns each
+      test point to its nearest training neighbours' most-accurate specialist.
+    """
+    from sklearn.base import BaseEstimator
+    from sklearn.ensemble import StackingClassifier
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import Pipeline
+
+    def wrap(model) -> Pipeline:
+        return Pipeline(steps=[("preprocessor", _build_preprocessor()), ("model", model)])
+
+    def mk_estimators():
+        return [
+            (f"m{i}", est)
+            for i, est in enumerate(_build_specialists(specialist_types, seed))
+        ]
+
+    def lr():
+        return LogisticRegression(max_iter=2000, C=1.0)
+
+    stacking = StackingClassifier(
+        estimators=mk_estimators(),
+        final_estimator=lr(),
+        cv=3,
+        stack_method="predict_proba",
+        n_jobs=-1,
+    )
+
+    class _AlgSelect(BaseEstimator):
+        """Pick the best specialist on a held-out validation split."""
+
+        def __init__(self, models):
+            self.models = models
+
+        def fit(self, X, y):
+            from sklearn.model_selection import train_test_split
+
+            X_tr, X_val, y_tr, y_val = train_test_split(
+                X, y, test_size=0.3, stratify=y, random_state=0
+            )
+            best, best_acc = None, -1.0
+            for name, est in self.models:
+                est.fit(X_tr, y_tr)
+                acc = np.mean(est.predict(X_val) == y_val)
+                if acc > best_acc:
+                    best_acc, best = acc, name
+            self.best_ = best
+            return self
+
+        def predict(self, X):
+            return dict(self.models)[self.best_].predict(X)
+
+    class _DCSLA(BaseEstimator):
+        """Dynamic classifier selection by local accuracy (k-NN in feature space)."""
+
+        def __init__(self, models, k=15):
+            self.models = models
+            self.k = k
+
+        def fit(self, X, y):
+            from sklearn.neighbors import NearestNeighbors
+
+            X = np.asarray(X)
+            y = np.asarray(y)
+            self.X_ = X
+            self.y_ = y
+            self.accs_ = []
+            for _, est in self.models:
+                est.fit(X, y)
+                pred = est.predict(X)
+                self.accs_.append(pred == y)
+            self.nn_ = NearestNeighbors(n_neighbors=min(self.k, len(X))).fit(X)
+            return self
+
+        def predict(self, X):
+            X = np.asarray(X)
+            dist, idx = self.nn_.kneighbors(X)
+            models = [m for _, m in self.models]
+            n = X.shape[0]
+            out = np.empty(n, dtype=object)
+            for i in range(n):
+                neigh = idx[i]
+                local = np.mean(
+                    [self.accs_[m][neigh] for m in range(len(self.models))], axis=1
+                )
+                best = int(np.argmax(local))
+                out[i] = models[best].predict(X[i : i + 1])[0]
+            if self.y_.dtype.kind in "iufb":
+                return out.astype(self.y_.dtype)
+            return out
+
+    return {
+        "StackingCV": wrap(stacking),
+        "AlgSelect": wrap(_AlgSelect(mk_estimators())),
+        "DCSLA": wrap(_DCSLA(mk_estimators())),
+    }
+
+
 def _build_pipeline(specialists: list[str], n_specialists: int, seed: int):
     """Build the routernet sklearn pipeline used for OpenML evaluation.
 
@@ -238,6 +372,7 @@ def _task_detailed(
     task,
     routernet_model,
     specialist_names: list[str],
+    specialist_types: list[str],
     n_folds: int,
 ) -> tuple[dict[str, float], int]:
     """Evaluate routernet, its specialists, uniform ensemble, and baselines.
@@ -259,6 +394,7 @@ def _task_detailed(
     from sklearn.preprocessing import LabelEncoder
 
     baselines = _baseline_models()
+    adaptive = _adaptive_baselines(specialist_types, seed=0)
 
     dataset = task.get_dataset()
     df = dataset.get_data(target=task.target_name)[0]
@@ -273,7 +409,7 @@ def _task_detailed(
     preprocessor = routernet_model.named_steps["preprocessor"]
     clf = routernet_model.named_steps["clf"]
 
-    model_names = ["Routernet", "Uniform", *specialist_names, *baselines.keys()]
+    model_names = ["Routernet", "Uniform", *specialist_names, *baselines.keys(), *adaptive.keys()]
     scores: dict[str, list[float]] = {name: [] for name in model_names}
 
     for fold in range(n_folds):
@@ -282,6 +418,8 @@ def _task_detailed(
         )
         X_train, X_test = df.iloc[train_idx], df.iloc[test_idx]
         y_train, y_test = y[train_idx], y[test_idx]
+        if not hasattr(df, "iloc"):
+            X_train, X_test = df[train_idx], df[test_idx]
 
         # Routernet pipeline
         routernet_model.fit(X_train, y_train)
@@ -309,6 +447,16 @@ def _task_detailed(
             scores[name].append(
                 sklearn.metrics.accuracy_score(y_test, baseline.predict(X_test))
             )
+
+        # Adaptive-ensemble baselines (stacking, algorithm selection, DCS-LA)
+        for name, baseline in adaptive.items():
+            try:
+                baseline.fit(X_train, y_train)
+                scores[name].append(
+                    sklearn.metrics.accuracy_score(y_test, baseline.predict(X_test))
+                )
+            except Exception:  # noqa: BLE001
+                scores[name].append(float("nan"))
 
     return (
         {name: float(np.mean(v)) for name, v in scores.items() if v},
@@ -391,20 +539,24 @@ def _save_markdown(results: list[dict], out_dir: Path, specialist_names: list[st
 
     out_dir.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(results)
-    pivot = df.pivot_table(
-        index="dataset", columns="model", values="accuracy", aggfunc="mean"
-    ).round(4)
+    pools = sorted(p for p in df["pool"].unique() if pd.notna(p)) if "pool" in df else [""]
 
-    order = ["Routernet", *specialist_names, "Uniform", "RandomForest", "XGBoost"]
-    order = [c for c in order if c in pivot.columns]
-    order += [c for c in pivot.columns if c not in order]
-    pivot = pivot.reindex(columns=order)
+    order = ["Routernet", *specialist_names, "Uniform", "StackingCV", "AlgSelect", "DCSLA", "RandomForest", "XGBoost"]
+    order = [c for c in order if c in df["model"].unique()]
+    order += [c for c in df["model"].unique() if c not in order]
+
+    lines = ["# Routernet OpenML Benchmark\n"]
+    for pool in pools:
+        pdf = df[df["pool"] == pool] if pool else df
+        pivot = pdf.pivot_table(
+            index="dataset", columns="model", values="accuracy", aggfunc="mean"
+        ).round(4)
+        pivot = pivot.reindex(columns=[c for c in order if c in pivot.columns])
+        lines.append(f"## Pool: `{pool}`\n")
+        lines.append(pivot.to_markdown() + "\n")
 
     md_path = out_dir / "openml_results.md"
-    md_path.write_text(
-        "# Routernet OpenML Benchmark\n\n" + pivot.to_markdown() + "\n",
-        encoding="utf-8",
-    )
+    md_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"Saved markdown report to {md_path}")
 
 
@@ -413,33 +565,38 @@ def _save_summary(results: list[dict], out_dir: Path, specialist_names: list[str
 
     out_dir.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(results)
-    pivot = df.pivot_table(
-        index="dataset", columns="model", values="accuracy", aggfunc="mean"
-    )
+    pools = sorted(p for p in df["pool"].unique() if pd.notna(p)) if "pool" in df else [""]
 
-    summary = pd.DataFrame(index=pivot.index)
-    spec_cols = [c for c in specialist_names if c in pivot.columns]
-    summary["BestExpert"] = pivot[spec_cols].max(axis=1) if spec_cols else np.nan
-    if "Uniform" in pivot.columns:
-        summary["Uniform"] = pivot["Uniform"]
-    summary["RouterNet"] = pivot["Routernet"]
-    if "Uniform" in pivot.columns:
-        summary["RouterNet_vs_Uniform"] = summary["RouterNet"] - summary["Uniform"]
-    for col in ("RandomForest", "XGBoost"):
-        if col in pivot.columns:
-            summary[col] = pivot[col]
-    summary = summary.round(4)
-
-    md_path = out_dir / "openml_summary.md"
-    md_path.write_text(
-        "# Routernet OpenML Benchmark Summary\n\n"
+    lines = [
+        "# Routernet OpenML Benchmark Summary\n",
         "> `RouterNet_vs_Uniform` is the routing ablation: > 0 means the router "
         "adds value over the exact experts it routes; ~0 means routing is "
-        "unnecessary; < 0 means routing is actively hurting.\n\n"
-        + summary.to_markdown()
-        + "\n",
-        encoding="utf-8",
-    )
+        "unnecessary; < 0 means routing is actively hurting. "
+        "`StackingCV`, `AlgSelect` and `DCSLA` are adaptive-ensemble baselines "
+        "that reuse the same specialist pool as routernet.\n",
+    ]
+    for pool in pools:
+        pdf = df[df["pool"] == pool] if pool else df
+        pivot = pdf.pivot_table(
+            index="dataset", columns="model", values="accuracy", aggfunc="mean"
+        )
+        summary = pd.DataFrame(index=pivot.index)
+        spec_cols = [c for c in specialist_names if c in pivot.columns]
+        summary["BestExpert"] = pivot[spec_cols].max(axis=1) if spec_cols else np.nan
+        if "Uniform" in pivot.columns:
+            summary["Uniform"] = pivot["Uniform"]
+        summary["RouterNet"] = pivot["Routernet"]
+        if "Uniform" in pivot.columns:
+            summary["RouterNet_vs_Uniform"] = summary["RouterNet"] - summary["Uniform"]
+        for col in ("StackingCV", "AlgSelect", "DCSLA", "RandomForest", "XGBoost"):
+            if col in pivot.columns:
+                summary[col] = pivot[col]
+        summary = summary.round(4)
+        lines.append(f"## Pool: `{pool}`\n")
+        lines.append(summary.to_markdown() + "\n")
+
+    md_path = out_dir / "openml_summary.md"
+    md_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"Saved summary report to {md_path}")
 
 
@@ -508,14 +665,23 @@ def run_benchmark(args: argparse.Namespace) -> int:
     tasks = _load_suite(args.suite)
     tasks = _filter_tasks_by_size(tasks, args.min_samples, args.max_samples)
 
-    specialists = (
-        [s.strip() for s in args.specialists.split(",") if s.strip()]
-        if args.specialists
-        else DEFAULT_SPECIALISTS
-    )
-    specialist_names = [s.upper() for s in specialists[: args.n_specialists]]
+    # Build the specialist pools to benchmark.
+    if args.specialists:
+        pool_map = {"custom": [s.strip() for s in args.specialists.split(",") if s.strip()]}
+        pools = pool_map
+    else:
+        pool_map = {}
+        for p in [x.strip() for x in args.pools.split(",") if x.strip()]:
+            if p not in SPECIALIST_POOLS:
+                raise OpenMLBenchmarkError(f"Unknown pool '{p}'. Options: {list(SPECIALIST_POOLS)}")
+            pool_map[p] = SPECIALIST_POOLS[p]
+        pools = pool_map
+
     baselines = _baseline_models()
-    routernet_model = _build_pipeline(specialists, args.n_specialists, args.seed)
+    pool_models: dict[str, object] = {
+        name: _build_pipeline(specs, args.n_specialists, args.seed)
+        for name, specs in pools.items()
+    }
 
     # -- Gate -------------------------------------------------------------- #
     gate_results = None
@@ -528,13 +694,19 @@ def run_benchmark(args: argparse.Namespace) -> int:
         )
         gate_tasks = tasks[: args.gate_tasks]
         gate_results = {}
+        gate_model_name = next(iter(pool_models))
+        gate_specialist_names = [s.upper() for s in pools[gate_model_name][: args.n_specialists]]
         for task in gate_tasks:
             tid = task.task_id
             name = task.get_dataset().name
             print(f"  - task {tid} ({name}):")
             try:
                 accs, nf = _task_detailed(
-                    task, routernet_model, specialist_names, args.gate_folds
+                    task,
+                    pool_models[gate_model_name],
+                    gate_specialist_names,
+                    pools[gate_model_name],
+                    args.gate_folds,
                 )
                 gate_results[tid] = accs
                 for model_name, acc in accs.items():
@@ -571,11 +743,12 @@ def run_benchmark(args: argparse.Namespace) -> int:
 
     print(
         f"\n[FULL] Running routernet on {len(full_tasks)} task(s), "
-        f"{args.n_folds} fold(s) each."
+        f"{args.n_folds} fold(s) each, pools: {', '.join(pool_models)}"
     )
     all_results: list[dict] = []
 
     if gate_results:
+        gate_pool_name = next(iter(pool_models))
         for tid, row in gate_results.items():
             task = next(t for t in full_tasks if t.task_id == tid)
             dataset_name = task.get_dataset().name
@@ -584,6 +757,7 @@ def run_benchmark(args: argparse.Namespace) -> int:
                     {
                         "task_id": tid,
                         "dataset": dataset_name,
+                        "pool": gate_pool_name,
                         "model": model_name,
                         "accuracy": acc,
                         "folds": args.gate_folds,
@@ -597,47 +771,54 @@ def run_benchmark(args: argparse.Namespace) -> int:
         if tid in done_ids:
             continue
         dataset_name = task.get_dataset().name
-        print(f"  - task {tid} ({dataset_name})...", end=" ", flush=True)
-        try:
-            accs, nf = _task_detailed(
-                task, routernet_model, specialist_names, args.n_folds
+        for pool_name, model in pool_models.items():
+            spec_names = [s.upper() for s in pools[pool_name][: args.n_specialists]]
+            print(
+                f"  - task {tid} ({dataset_name}) pool={pool_name}...",
+                end=" ",
+                flush=True,
             )
-            for model_name, acc in accs.items():
+            try:
+                accs, nf = _task_detailed(
+                    task, model, spec_names, pools[pool_name], args.n_folds
+                )
+                for model_name, acc in accs.items():
+                    all_results.append(
+                        {
+                            "task_id": tid,
+                            "dataset": dataset_name,
+                            "pool": pool_name,
+                            "model": model_name,
+                            "accuracy": acc,
+                            "folds": nf,
+                            "gate": False,
+                        }
+                    )
+                print(f"acc={accs['Routernet']:.4f} (folds={nf})")
+            except Exception as exc:  # noqa: BLE001
+                print(f"FAILED: {exc}")
                 all_results.append(
                     {
                         "task_id": tid,
                         "dataset": dataset_name,
-                        "model": model_name,
-                        "accuracy": acc,
-                        "folds": nf,
+                        "pool": pool_name,
+                        "model": "Routernet",
+                        "accuracy": np.nan,
+                        "folds": 0,
+                        "error": str(exc),
                         "gate": False,
                     }
                 )
-            print(f"acc={accs['Routernet']:.4f} (folds={nf})")
-        except Exception as exc:  # noqa: BLE001
-            print(f"FAILED: {exc}")
-            all_results.append(
-                {
-                    "task_id": tid,
-                    "dataset": dataset_name,
-                    "model": "Routernet",
-                    "accuracy": np.nan,
-                    "folds": 0,
-                    "error": str(exc),
-                    "gate": False,
-                }
-            )
 
     # -- Publish ----------------------------------------------------------- #
     if args.publish and passed:
         print("\n[PUBLISH] Uploading routernet runs to OpenML...")
         published = 0
         failed = []
+        publish_model = next(iter(pool_models.values()))
         for task in full_tasks:
             try:
-                run = openml.runs.run_model_on_task(
-                    routernet_model, task, seed=1
-                )
+                run = openml.runs.run_model_on_task(publish_model, task, seed=1)
                 run.publish()
                 published += 1
                 print(f"  uploaded run {run.run_id} for task {task.task_id}")
@@ -655,9 +836,10 @@ def run_benchmark(args: argparse.Namespace) -> int:
     elif args.publish:
         print("Skipping publish: gate did not pass.")
 
+    spec_names_mixed = [s.upper() for s in pools[next(iter(pool_models))][: args.n_specialists]]
     _save_results(all_results, out_dir)
-    _save_markdown(all_results, out_dir, specialist_names)
-    _save_summary(all_results, out_dir, specialist_names)
+    _save_markdown(all_results, out_dir, spec_names_mixed)
+    _save_summary(all_results, out_dir, spec_names_mixed)
 
     accs = [
         r["accuracy"]
@@ -736,6 +918,12 @@ def main(argv: list[str] | None = None) -> int:
         "--specialists",
         default=None,
         help="Comma-separated specialist types (e.g. 'gb,rf,et,svm,mlp')",
+    )
+    parser.add_argument(
+        "--pools",
+        default="mixed",
+        help="Comma-separated specialist pools to benchmark. Options: "
+        "'mixed', 'trees', 'nn' (see SPECIALIST_POOLS). Default: mixed.",
     )
     parser.add_argument(
         "--n-specialists",

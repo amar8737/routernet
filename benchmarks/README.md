@@ -45,6 +45,9 @@ Skip the gate entirely with `--force`. Upload runs to OpenML only with
 --gate-win-rate   required win-rate vs median base  (default: 0.5)
 --gate-min-rel    required rel-accuracy vs best base(default: 0.97)
 --n-folds         folds for the full run            (default: 1)
+--pools           specialist pools to benchmark      (default: mixed; options:
+                  mixed, trees, nn, or comma-separated e.g. mixed,nn)
+--specialists     comma-separated specialist types (overrides --pools)
 --limit           max tasks in the full run         (default: 10)
 --min-samples     skip datasets smaller than this
 --max-samples     skip datasets larger than this
@@ -61,6 +64,9 @@ Skip the gate entirely with `--force`. Upload runs to OpenML only with
 ```bash
 # Partial benchmark (gate + 10 tasks, 1 fold each)
 python benchmarks/openml_benchmark.py
+
+# Benchmark 20 tasks across all three specialist pools (mixed/trees/nn)
+python benchmarks/openml_benchmark.py --limit 20 --pools mixed,trees,nn
 
 # Full CC18 suite, 3 folds per task, no upload
 python benchmarks/openml_benchmark.py --limit 0 --n-folds 3 --max-samples 20000

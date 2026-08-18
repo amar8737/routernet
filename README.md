@@ -85,10 +85,12 @@ run and publishes to OpenML only if routernet performs well:
 ```bash
 pip install -r benchmarks/requirements.txt
 export OPENML_API_KEY=YOUR_OPENML_API_KEY
-python benchmarks/openml_benchmark.py --gate-tasks 6 --limit 10
+python benchmarks/openml_benchmark.py --gate-tasks 6 --limit 20 --pools mixed,trees,nn
 ```
 
-See [`benchmarks/README.md`](benchmarks/README.md) for details.
+See [`benchmarks/README.md`](benchmarks/README.md) for details, and
+[`THEORY.md`](THEORY.md) for a rigorous account of *when* sample-conditional
+routing is provably better than a fixed-weight ensemble.
 
 ## Benchmark results
 
