@@ -90,6 +90,33 @@ python benchmarks/openml_benchmark.py --gate-tasks 6 --limit 10
 
 See [`benchmarks/README.md`](benchmarks/README.md) for details.
 
+## Benchmark results
+
+Evaluated on the first 10 tasks of [OpenML-CC18](https://www.openml.org/s/99),
+using OpenML's official train/test splits (1 fold each), with a 6-task
+performance gate (win-rate vs. median baseline and relative accuracy vs. best
+baseline).
+
+| dataset             | BestExpert | Uniform | RouterNet | Δ vs Uniform | RandomForest | XGBoost |
+|:--------------------|-----------:|--------:|----------:|-------------:|-------------:|--------:|
+| balance-scale       |      1.000 |  0.9206 |    0.9524 |       +0.032 |       0.8889 |  0.9365 |
+| breast-w            |      0.9857 |  0.9571 |    0.9571 |       0.000  |       0.9714 |  0.9714 |
+| cmc                 |      0.5946 |  0.5473 |    0.5676 |       +0.020 |       0.5743 |  0.5743 |
+| kr-vs-kp            |      0.9938 |  0.9906 |    0.9969 |       +0.006 |       0.9875 |  0.9938 |
+| letter              |      0.9725 |  0.9745 |    0.9740 |       -0.001 |       0.8685 |  0.9550 |
+| mfeat-factors       |      0.9750 |  0.9800 |    0.9800 |       0.000  |       0.9600 |  0.9600 |
+| mfeat-fourier       |      0.8500 |  0.8300 |    0.8250 |       -0.005 |       0.8250 |  0.8500 |
+| mfeat-karhunen      |      0.9800 |  0.9850 |    0.9800 |       -0.005 |       0.9700 |  0.9550 |
+| mfeat-morphological |      0.7000 |  0.6650 |    0.6650 |       0.000  |       0.6700 |  0.6700 |
+| mfeat-zernike       |      0.8100 |  0.7800 |    0.7950 |       +0.015 |       0.7400 |  0.7950 |
+
+`Δ vs Uniform` is the routing ablation: > 0 means the router adds value over the
+exact experts it routes; ~0 means routing is unnecessary. Routernet matches or
+improves on the uniform ensemble in 7 of 10 tasks.
+
+The full per-dataset × model matrix and raw CSVs are in [`results/`](results/);
+see [`benchmarks/README.md`](benchmarks/README.md) to reproduce.
+
 ## License
 
 Apache 2.0 — see [`LICENSE`](LICENSE).

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "routernet"
-version = "0.1.3"
-description = "Per-sample specialist routing ensemble with learned context awareness (ACE)"
+version = "0.1.4"
+description = "Per-sample specialist routing ensemble with learned context awareness"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
